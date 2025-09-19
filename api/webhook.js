@@ -1,112 +1,154 @@
-export default async function handler(req, res) {
-  // ---- VERIFY (GET /api/webhook?hub.mode=...&hub.verify_token=...&hub.challenge=...) ----
-  if (req.method === 'GET') {
-    const mode = req.query['hub.mode'];
-    const token = req.query['hub.verify_token'];
-    const challenge = req.query['hub.challenge'];
+// api/webhook.js
+const WPP_API = (phoneId) => `https://graph.facebook.com/v20.0/${phoneId}/messages`;
+const AUTH = () => ({ 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}` });
 
-    if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-      return res.status(200).send(challenge);
+async function postJSON(url, payload) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15000); // timeout 15s
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { ...AUTH(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.error('Graph POST non-200', res.status, text);
+      throw new Error(`Graph ${res.status}: ${text}`);
     }
-    return res.status(403).send('Forbidden');
+    return text;
+  } catch (e) {
+    console.error('Graph POST failed:', e);
+    throw e;
+  } finally {
+    clearTimeout(t);
   }
-
-  // ---- RECEBER EVENTO (POST /api/webhook) ----
-  if (req.method === 'POST') {
-    res.status(200).end(); // responde rápido pro Meta
-
-    try {
-      const entry = req.body?.entry?.[0];
-      const change = entry?.changes?.[0];
-      const msg = change?.value?.messages?.[0];
-      if (!msg) return;
-
-      const toSend = msg.from; // telefone do usuário (E.164, sem "whatsapp:")
-      const type = msg.type;
-
-      // se usuário digitar oi/menu → envia o menu mínimo
-      if (type === 'text') {
-        const body = (msg.text?.body || '').trim().toLowerCase();
-        if (body === 'oi' || body === 'menu') {
-          await sendMainMenu(toSend);
-        } else {
-          await sendText(toSend, 'Digite "menu" para começar.');
-        }
-        return;
-      }
-
-      // se usuário clicou no List → vem list_reply.id
-      if (type === 'interactive' && msg.interactive?.type === 'list_reply') {
-        const choiceId = msg.interactive.list_reply.id;
-        switch (choiceId) {
-          case 'MAIN_ESTETICA':
-            await sendText(toSend, 'Estética — teste ok. (Depois abrimos o submenu aqui)');
-            break;
-          case 'BACK_HOME':
-          default:
-            await sendMainMenu(toSend);
-        }
-        return;
-      }
-
-      // outros tipos
-      await sendText(toSend, 'Recebi sua mensagem. Digite "menu".');
-
-    } catch (e) {
-      console.error('Erro no webhook:', e);
-    }
-    return;
-  }
-
-  // método não suportado
-  res.setHeader('Allow', 'GET, POST');
-  return res.status(405).send('Method Not Allowed');
 }
 
-// --------- helpers de envio ----------
-async function sendText(to, text) {
-  await fetch(`https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'text',
-      text: { body: text }
-    })
+async function sendText(to, body) {
+  return postJSON(WPP_API(process.env.PHONE_NUMBER_ID), {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'text',
+    text: { body }
   });
 }
 
 async function sendMainMenu(to) {
-  await fetch(`https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      messaging_product: 'whatsapp',
-      to,
-      type: 'interactive',
-      interactive: {
-        type: 'list',
-        header: { type: 'text', text: 'Clínica Juliana Hortense' },
-        body:   { text: 'Selecione uma opção:' },
-        footer: { text: 'Novidade: Longevidade e Emagrecimento com o Dr. João.' },
-        action: {
-          button: 'Abrir',
-          sections: [{
-            title: 'Menu',
-            rows: [
-              { id: 'MAIN_ESTETICA', title: 'Estética',        description: 'Procedimentos' },
-              { id: 'BACK_HOME',     title: 'Voltar ao menu', description: 'Reabrir menu' }
-            ]
-          }]
+  return postJSON(WPP_API(process.env.PHONE_NUMBER_ID), {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'list',
+      header: { type: 'text', text: 'Clínica Juliana Hortense' },
+      body:   { text: 'Selecione uma opção:' },
+      footer: { text: 'Novidade: Longevidade e Emagrecimento com o Dr. João.' },
+      action: {
+        button: 'Abrir',
+        sections: [{
+          title: 'Menu',
+          rows: [
+            { id: 'MAIN_ESTETICA', title: 'Estética',        description: 'Procedimentos' },
+            { id: 'BACK_HOME',     title: 'Voltar ao menu', description: 'Reabrir menu' }
+          ]
+        }]
+      }
+    }
+  });
+}
+
+// --- Healthcheck: chama o Graph pra ver se credenciais/conectividade OK ---
+export async function GET(req, res) {
+  const url = new URL(req.url);
+  const mode = url.searchParams.get('hub.mode');
+  const token = url.searchParams.get('hub.verify_token');
+  const challenge = url.searchParams.get('hub.challenge');
+
+  // Webhook verify
+  if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
+    return new Response(challenge, { status: 200 });
+  }
+
+  // Ping opcional: GET /api/webhook?ping=1&to=5561996531507
+  if (url.searchParams.get('ping') === '1') {
+    const to = url.searchParams.get('to');
+    try {
+      const resp = await sendText(to || '5561996531507', 'PING ✅');
+      return new Response(`PING_OK ${resp}`, { status: 200 });
+    } catch (e) {
+      return new Response(`PING_FAIL ${e}`, { status: 500 });
+    }
+  }
+
+  return new Response('OK', { status: 200 });
+}
+
+export async function POST(req) {
+  try {
+    const body = await req.json();
+    const entry = body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const msg = change?.value?.messages?.[0];
+
+    // responda rápido pro Meta
+    const ack = new Response('', { status: 200 });
+
+    if (!msg) return ack;
+
+    const from = msg.from; // e.g. 5561996531507
+    const type = msg.type;
+
+    // debug básico
+    console.log('INBOUND type:', type, 'from:', from);
+
+    if (type === 'text') {
+      const txt = (msg.text?.body || '').trim().toLowerCase();
+      if (txt === 'oi' || txt === 'menu') {
+        // tente enviar o menu
+        try {
+          const r = await sendMainMenu(from);
+          console.log('MENU_SENT', r);
+        } catch (e) {
+          console.error('MENU_SEND_ERROR', e);
+        }
+      } else {
+        try {
+          const r = await sendText(from, 'Digite "menu" para começar.');
+          console.log('TEXT_SENT', r);
+        } catch (e) {
+          console.error('TEXT_SEND_ERROR', e);
         }
       }
-    })
-  });
+      return ack;
+    }
+
+    if (type === 'interactive' && msg.interactive?.type === 'list_reply') {
+      const choiceId = msg.interactive.list_reply.id;
+      console.log('CHOICE_ID', choiceId);
+      try {
+        if (choiceId === 'MAIN_ESTETICA') {
+          await sendText(from, 'Estética — teste ok. (Depois abrimos o submenu aqui)');
+        } else {
+          await sendMainMenu(from);
+        }
+      } catch (e) {
+        console.error('REPLY_SEND_ERROR', e);
+      }
+      return ack;
+    }
+
+    // outros tipos
+    try {
+      await sendText(from, 'Recebi sua mensagem. Digite "menu".');
+    } catch (e) {
+      console.error('FALLBACK_SEND_ERROR', e);
+    }
+    return ack;
+
+  } catch (e) {
+    console.error('Webhook handler error:', e);
+    return new Response('', { status: 200 });
+  }
 }
