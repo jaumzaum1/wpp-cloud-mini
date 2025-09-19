@@ -63,7 +63,7 @@ async function sendMainMenu(to) {
   return sendList(to, {
     header: 'Clínica Juliana Hortense',
     body: 'Selecione uma opção:',
-    footer: 'Novidade: Longevidade & Emagrecimento com o Dr. João Maldonado.',
+    footer: 'Novidade: Longevidade & Emagrecimento com o Dr. João.',
     button: 'Abrir',
     rows: [
       { id: 'MAIN_MEDICOS',   title: 'Médicos',                 description: 'Conheça quem atende' },
